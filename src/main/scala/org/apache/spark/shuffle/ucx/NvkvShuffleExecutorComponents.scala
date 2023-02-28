@@ -16,23 +16,36 @@ import org.apache.spark.shuffle.api.ShuffleMapOutputWriter;
 import org.apache.spark.shuffle.IndexShuffleBlockResolver;
 import org.apache.spark.shuffle.api.SingleSpillShuffleMapOutputWriter;
 import org.apache.spark.storage.BlockManager;
-// import org.apache.spark.shuffle.ucx.DpuShuffleMapOutputWriter;
 import org.apache.spark.shuffle.ucx;
-
-import org.openucx.nvkv.Nvkv;
-
-// temp
 import org.apache.spark.shuffle.sort.io.{LocalDiskShuffleMapOutputWriter, LocalDiskSingleSpillMapOutputWriter};
+
+import org.openucx.jnvkv.Nvkv;
 
 class NvkvShuffleExecutorComponents(val sparkConf: SparkConf) extends ShuffleExecutorComponents with Logging {
     logDebug("LEO NvkvShuffleExecutorComponents constructor");
-    // Need to pass disk+nsid in Init
-    // Nvkv.init("mlx5_0", 1, "0x1");
+    
+    private var blockResolver: IndexShuffleBlockResolver = null;
+    
+    override def initializeExecutor(appId: String, execId: String, extraConfigs: Map[String, String]) = {
+    logDebug("LEO NvkvShuffleExecutorComponents initializeExecutor; execId: " + execId);
 
-  private var blockResolver: IndexShuffleBlockResolver = null;
+    val ib_devices_str = sparkConf.get("spark.shuffle.ucx.ib_devices", "mlx5_0");
+    val ib_devices_arr = ib_devices_str.split(",");
+    val ib_device = ib_devices_arr(execId.toInt % ib_devices_arr.length)
 
-  override def initializeExecutor(appId: String, execId: String, extraConfigs: Map[String, String]) = {
-    logDebug("LEO NvkvShuffleExecutorComponents initializeExecutor");
+    val coreMask = sparkConf.get("spark.shuffle.ucx.core_mask", "0x1");
+
+    val nmve_devices_str = sparkConf.get("spark.shuffle.ucx.nvme_devices", "41:00.0");
+    val nmve_devices_arr = nmve_devices_str.split(",");
+    val nvme_device = nmve_devices_arr(execId.toInt % nmve_devices_arr.length)
+
+    logDebug("LEO ib_device: " + ib_device + " coreMask: " + coreMask + " nvme_device: " + nvme_device);
+    Nvkv.init(ib_device, 1, coreMask);
+
+    var  ds = Array ( new Nvkv.DataSet(nvme_device, 1) );
+
+    var nvkvContext = Nvkv.open(ds , Nvkv.LOCAL);
+
     val blockManager = SparkEnv.get.blockManager;
     if (blockManager == null) {
       throw new IllegalStateException("No blockManager available from the SparkEnv.");

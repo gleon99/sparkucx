@@ -50,7 +50,7 @@ import org.apache.log4j.Logger;
  import org.apache.spark.util.Utils;
 
 
- import org.openucx.nvkv.Nvkv;
+ import org.openucx.jnvkv.Nvkv;
 
 
 public class NvkvShuffleMapOutputWriter implements ShuffleMapOutputWriter {
