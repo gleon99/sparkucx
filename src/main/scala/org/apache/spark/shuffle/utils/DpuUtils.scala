@@ -11,7 +11,8 @@ import java.io.File;
 import org.ini4j.Ini
 
 object DpuUtils {
-    val CLUSTER_CONF_FILE = "/hpc/mtr_scrap/users/lgenkin/spark/cluster.ini"
+    val user_name = System.getProperty("user.name")
+    val CLUSTER_CONF_FILE = s"/hpc/mtr_scrap/users/$user_name/spark/cluster.ini"
 
     /**
       * Retrieve the IP address of the local DPU. For POC purposes, all IPs are assumed
