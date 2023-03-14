@@ -25,30 +25,17 @@ class NvkvShuffleExecutorComponents(val sparkConf: SparkConf) extends ShuffleExe
     logDebug("LEO NvkvShuffleExecutorComponents constructor");
     
     private var blockResolver: IndexShuffleBlockResolver = null;
+    private var nvkvWrapper: NvkvWrapper = null;
     
     override def initializeExecutor(appId: String, execId: String, extraConfigs: Map[String, String]) = {
-    logDebug("LEO NvkvShuffleExecutorComponents initializeExecutor; execId: " + execId);
 
-    val execIdInt = execId.toInt;
+   
 
-    val ibDevicesStr = sparkConf.get("spark.shuffle.ucx.ib_devices", "mlx5_0");
-    val ibDevicesArr = ibDevicesStr.split(",");
-    val ibDevice = ibDevicesArr(execIdInt % ibDevicesArr.length)
-
-    val coreMask = sparkConf.get("spark.shuffle.ucx.core_mask", "0x1");
-
-    val nmveDevicesStr = sparkConf.get("spark.shuffle.ucx.nvme_devices", "41:00.0");
-    val nmveDevicesArr = nmveDevicesStr.split(",");
-    val nvmeDevice = nmveDevicesArr(execIdInt % nmveDevicesArr.length)
-
-    logDebug("LEO ib_device: " + ibDevice + " coreMask: " + coreMask + " nvme_device: " + nvmeDevice);
-    Nvkv.init(ibDevice, 1, coreMask);
-    logDebug("LEO NvkvShuffleExecutorComponents initializeExecutor; Nvkv.init done")
-
-    var ds = Array ( new Nvkv.DataSet(nvmeDevice, execIdInt) );
-
-    var nvkvContext = Nvkv.open(ds , Nvkv.LOCAL);
-    logDebug("LEO NvkvShuffleExecutorComponents initializeExecutor; Nvkv.open done")
+    nvkvWrapper = new NvkvWrapper(execId, sparkConf)
+    
+    // .get("spark.shuffle.ucx.ib_devices", "mlx5_0"),
+    //                               sparkConf.get("spark.shuffle.ucx.core_mask", "0x1"),
+    //                               sparkConf.get("spark.shuffle.ucx.nvme_devices", "41:00.0"));
 
     val blockManager = SparkEnv.get.blockManager;
     if (blockManager == null) {
