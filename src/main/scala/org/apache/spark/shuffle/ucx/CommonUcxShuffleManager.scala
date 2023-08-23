@@ -4,16 +4,22 @@
 */
 package org.apache.spark.shuffle.ucx
 
+import java.net.InetSocketAddress
+import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
+
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.util.Success
 
 import org.apache.spark.rpc.RpcEnv
 import org.apache.spark.shuffle.sort.SortShuffleManager
 import org.apache.spark.shuffle.ucx.rpc.{UcxDriverRpcEndpoint, UcxExecutorRpcEndpoint}
-import org.apache.spark.shuffle.ucx.rpc.UcxRpcMessages.{ExecutorAdded, IntroduceAllExecutors}
-import org.apache.spark.shuffle.ucx.utils.SerializableDirectBuffer
+import org.apache.spark.shuffle.ucx.rpc.UcxRpcMessages.{ExecutorAdded, IntroduceAllExecutors, NvkvRequestLock}
+import org.apache.spark.shuffle.ucx.utils.{SerializableDirectBuffer, SerializationUtils, DpuUtils}
+import org.apache.spark.shuffle.utils.{UnsafeUtils, CommonUtils}
 import org.apache.spark.util.{RpcUtils, ThreadUtils}
 import org.apache.spark.{SecurityManager, SparkConf, SparkEnv}
+import scala.concurrent.duration._
 
 /**
  * Common part for all spark versions for UcxShuffleManager logic
@@ -34,20 +40,27 @@ abstract class CommonUcxShuffleManager(val conf: SparkConf, isDriver: Boolean) e
 
   private val setupThread = ThreadUtils.newDaemonSingleThreadExecutor("UcxTransportSetupThread")
 
+  logInfo("CommonUcxShuffleManager")
+
+  def getTransport(): UcxShuffleTransport = { ucxTransport }
+  def setTransport(transport: UcxShuffleTransport): Unit = { ucxTransport = transport }
+
   setupThread.submit(new Runnable {
     override def run(): Unit = {
-      while (SparkEnv.get == null) {
-        Thread.sleep(10)
-      }
+      CommonUtils.safePolling(() => {},
+      () => {SparkEnv.get == null}, 10.seconds.fromNow,
+      "Got timeout when polling", Duration(10, "millis"))
+
       if (isDriver) {
         val rpcEnv = SparkEnv.get.rpcEnv
         logInfo(s"Setting up driver RPC")
         driverEndpoint = new UcxDriverRpcEndpoint(rpcEnv)
         rpcEnv.setupEndpoint(driverRpcName, driverEndpoint)
       } else {
-        while (SparkEnv.get.blockManager.blockManagerId == null) {
-          Thread.sleep(5)
-        }
+        CommonUtils.safePolling(() => {},
+          () => {SparkEnv.get.blockManager.blockManagerId == null},
+          10.seconds.fromNow,
+          "Got timeout when polling", Duration(5, "millis"))
         startUcxTransport()
       }
     }
@@ -57,24 +70,33 @@ abstract class CommonUcxShuffleManager(val conf: SparkConf, isDriver: Boolean) e
    * Atomically starts UcxNode singleton - one for all shuffle threads.
    */
   def startUcxTransport(): Unit = if (ucxTransport == null) {
+    logInfo("startUcxTransport")
     val blockManager = SparkEnv.get.blockManager.blockManagerId
     val transport = new UcxShuffleTransport(ucxShuffleConf, blockManager.executorId.toLong)
-    val address = transport.init()
-    ucxTransport = transport
+    transport.init()
+
     val rpcEnv = RpcEnv.create("ucx-rpc-env", blockManager.host, blockManager.port,
       conf, new SecurityManager(conf), clientMode = false)
-    executorEndpoint = new UcxExecutorRpcEndpoint(rpcEnv, ucxTransport, setupThread)
+    val driverEndpoint = RpcUtils.makeDriverRef(driverRpcName, conf, rpcEnv)
+
+    executorEndpoint = new UcxExecutorRpcEndpoint(rpcEnv, transport, setupThread,
+        ucxTransport, driverEndpoint, blockManager.executorId.toLong, setTransport)
     val endpoint = rpcEnv.setupEndpoint(
       s"ucx-shuffle-executor-${blockManager.executorId}",
       executorEndpoint)
-    val driverEndpoint = RpcUtils.makeDriverRef(driverRpcName, conf, rpcEnv)
+    logInfo(s"startUcxTransport sending RPC IntroduceAllExecutors")
+
+    var sockAddress = DpuUtils.getLocalDpuSocketAddress()
+    logInfo(s"Local DPU Socket Address ${sockAddress}")
     driverEndpoint.ask[IntroduceAllExecutors](ExecutorAdded(blockManager.executorId.toLong, endpoint,
-      new SerializableDirectBuffer(address)))
+      new SerializableDirectBuffer(SerializationUtils.serializeInetAddress(sockAddress))))
       .andThen {
         case Success(msg) =>
           logInfo(s"Receive reply $msg")
           executorEndpoint.receive(msg)
       }
+
+    driverEndpoint.send(NvkvRequestLock(blockManager.executorId.toLong, endpoint))
   }
 
 

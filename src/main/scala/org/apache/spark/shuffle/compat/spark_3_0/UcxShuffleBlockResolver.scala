@@ -5,9 +5,14 @@
 package org.apache.spark.shuffle.compat.spark_3_0
 
 import java.io.{File, RandomAccessFile}
+import java.nio.ByteBuffer
 
-import org.apache.spark.TaskContext
-import org.apache.spark.shuffle.ucx.{CommonUcxShuffleBlockResolver, CommonUcxShuffleManager}
+import org.apache.spark.{TaskContext, SparkEnv}
+import org.apache.spark.storage._
+import org.apache.spark.network.buffer.{NioManagedBuffer, ManagedBuffer}
+import org.apache.spark.shuffle.utils.UnsafeUtils
+import org.apache.spark.shuffle.ucx.{OperationCallback, OperationResult, UcxShuffleTransport, CommonUcxShuffleBlockResolver, CommonUcxShuffleManager}
+
 
 /**
  * Mapper entry point for UcxShuffle plugin. Performs memory registration
@@ -15,6 +20,8 @@ import org.apache.spark.shuffle.ucx.{CommonUcxShuffleBlockResolver, CommonUcxShu
  */
 class UcxShuffleBlockResolver(ucxShuffleManager: CommonUcxShuffleManager)
   extends CommonUcxShuffleBlockResolver(ucxShuffleManager) {
+
+  val shuffleManager: CommonUcxShuffleManager = ucxShuffleManager
 
 
   override def writeIndexFileAndCommit(shuffleId: ShuffleId, mapId: Long,
@@ -28,5 +35,28 @@ class UcxShuffleBlockResolver(ucxShuffleManager: CommonUcxShuffleManager)
       return
     }
     writeIndexFileAndCommitCommon(shuffleId, partitionId, lengths, new RandomAccessFile(dataFile, "r"))
+  }
+
+  override def getBlockData(
+      blockId: BlockId,
+      dirs: Option[Array[String]]): ManagedBuffer = {
+
+    val ucxTransport: UcxShuffleTransport = shuffleManager.ucxTransport
+
+    logInfo("UcxShuffleBlockResolver getBlockData")
+    val (shuffleId, mapId, startReduceId, endReduceId) = blockId match {
+      case id: ShuffleBlockId =>
+        (id.shuffleId, id.mapId, id.reduceId, id.reduceId + 1)
+      case batchId: ShuffleBlockBatchId =>
+        (batchId.shuffleId, batchId.mapId, batchId.startReduceId, batchId.endReduceId)
+      case _ =>
+        throw new IllegalArgumentException("unexpected shuffle block id format: " + blockId)
+     }
+    
+    var length = ucxTransport.getNvkvWrapper.getPartitonLength(shuffleId, mapId, startReduceId).toInt
+    var offset = ucxTransport.getNvkvWrapper.getPartitonOffset(shuffleId, mapId, startReduceId)
+    logDebug(s"UcxShuffleBlockResolver - Reading shuffleId $shuffleId mapId $mapId reduceId $startReduceId at offset $offset with length $length from nvkv")
+    var resultBuffer = ucxTransport.getNvkvWrapper.read(length, offset)
+    new NioManagedBuffer(resultBuffer)
   }
 }
